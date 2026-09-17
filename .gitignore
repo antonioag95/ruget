@@ -1,0 +1,17 @@
+# Build output
+/dist/
+*.exe
+
+# Runtime config (may contain a private server URL)
+ruget.json
+
+# Go test/coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Editor and OS cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
