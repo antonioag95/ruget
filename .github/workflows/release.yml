@@ -9,17 +9,8 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { goos: windows, goarch: amd64, ext: ".exe" }
-          - { goos: linux, goarch: amd64, ext: "" }
-          - { goos: linux, goarch: arm64, ext: "" }
-          - { goos: darwin, goarch: amd64, ext: "" }
-          - { goos: darwin, goarch: arm64, ext: "" }
     steps:
       - uses: actions/checkout@v7
 
@@ -28,18 +19,24 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build
+      - name: Build all targets
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
           version="${GITHUB_REF_NAME#v}"
-          name="ruget-${GOOS}-${GOARCH}${{ matrix.ext }}"
+          ldflags="-s -w -X main.version=${version}"
           mkdir -p dist
-          go build -trimpath -ldflags "-s -w -X main.version=${version}" -o "dist/${name}" .
+          for target in windows/amd64/.exe linux/amd64/ linux/arm64/ darwin/amd64/ darwin/arm64/; do
+            goos="${target%%/*}"
+            rest="${target#*/}"
+            goarch="${rest%%/*}"
+            ext="${rest#*/}"
+            echo "building ruget-${goos}-${goarch}${ext}"
+            GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags "$ldflags" \
+              -o "dist/ruget-${goos}-${goarch}${ext}" .
+          done
 
-      - name: Upload to release
+      - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
           files: dist/*
