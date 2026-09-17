@@ -244,6 +244,10 @@ type msgPrepareDone struct {
 	plan *downloadPlan
 	err  error
 }
+type msgTorrents struct {
+	entries []torrentEntry
+	err     error
+}
 type msgDownloadDone struct {
 	outcomes   []Outcome
 	downloaded int
@@ -257,6 +261,7 @@ const (
 	stateFetching
 	stateDownloading
 	stateDone
+	stateTorrents
 )
 
 // --- model ------------------------------------------------------------------
@@ -278,6 +283,16 @@ type tuiModel struct {
 	inputs []textinput.Model
 	focus  int
 	err    string
+
+	torrents        []torrentEntry
+	torrentErr      string
+	torrentLoading  bool
+	torrentSel      int
+	torrentOffset   int
+	selectedTorrent string
+	searching       bool
+	filter          string
+	searchInput     textinput.Model
 
 	st  *tuiState
 	rep *tuiReporter
@@ -322,15 +337,21 @@ func newTUIModel(ctx context.Context, cfg Config, configPath string) tuiModel {
 		inputs[i] = ti
 	}
 
+	search := textinput.New()
+	search.Placeholder = "filter by name or hash"
+	search.CharLimit = 128
+	search.Width = 40
+
 	st := newTUIState()
 	return tuiModel{
-		cfg:        cfg,
-		configPath: configPath,
-		baseCtx:    ctx,
-		inputs:     inputs,
-		st:         st,
-		rep:        &tuiReporter{st: st},
-		control:    make(chan tea.Msg, 8),
+		cfg:         cfg,
+		configPath:  configPath,
+		baseCtx:     ctx,
+		inputs:      inputs,
+		searchInput: search,
+		st:          st,
+		rep:         &tuiReporter{st: st},
+		control:     make(chan tea.Msg, 8),
 		overall: progress.New(
 			progress.WithSolidFill(colActive),
 			progress.WithoutPercentage(),
@@ -366,6 +387,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case msgPrepareDone:
 		return m.onPrepareDone(msg)
+
+	case msgTorrents:
+		return m.onTorrentsDone(msg)
 
 	case msgDownloadDone:
 		m.busy = false
@@ -405,6 +429,71 @@ func (m tuiModel) onPrepareDone(msg msgPrepareDone) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m tuiModel) onTorrentsDone(msg msgTorrents) (tea.Model, tea.Cmd) {
+	m.torrentLoading = false
+	if msg.err != nil {
+		m.torrentErr = msg.err.Error()
+		m.torrents = nil
+		return m, nil
+	}
+	m.torrentErr = ""
+	m.torrents = msg.entries
+	m.torrentSel = 0
+	m.torrentOffset = 0
+	return m, nil
+}
+
+// visibleTorrents filters the loaded torrents by the current query, matching
+// the name or the hash case-insensitively.
+func (m tuiModel) visibleTorrents() []torrentEntry {
+	q := strings.ToLower(strings.TrimSpace(m.filter))
+	if q == "" {
+		return m.torrents
+	}
+	out := make([]torrentEntry, 0, len(m.torrents))
+	for _, t := range m.torrents {
+		if strings.Contains(strings.ToLower(t.Name), q) || strings.Contains(strings.ToLower(t.Hash), q) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// applyFilter pulls the query from the search box and resets the selection.
+func (m *tuiModel) applyFilter() {
+	m.filter = m.searchInput.Value()
+	m.torrentSel = 0
+	m.torrentOffset = 0
+}
+
+// moveTorrentSelection shifts the highlight within the filtered list.
+func (m *tuiModel) moveTorrentSelection(delta int) {
+	n := len(m.visibleTorrents())
+	if n == 0 {
+		m.torrentSel = 0
+		m.torrentOffset = 0
+		return
+	}
+	m.torrentSel += delta
+	if m.torrentSel < 0 {
+		m.torrentSel = 0
+	}
+	if m.torrentSel > n-1 {
+		m.torrentSel = n - 1
+	}
+	m.clampTorrentScroll()
+}
+
+// stopSearch leaves search mode, optionally clearing the query.
+func (m *tuiModel) stopSearch(clear bool) {
+	m.searching = false
+	m.searchInput.Blur()
+	if clear {
+		m.searchInput.SetValue("")
+	}
+	m.applyFilter()
+}
+
 func (m *tuiModel) startDownload(indices []int) tea.Cmd {
 	ctx, cancel := context.WithCancel(m.baseCtx)
 	m.cancel = cancel
@@ -442,10 +531,20 @@ func (m tuiModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// printable character, so it never collides with typing. "q" is an alias on
 	// the non-form screens, and ctrl+c always works.
 	switch msg.String() {
-	case "ctrl+c", "esc":
+	case "ctrl+c":
+		return m.quit()
+	case "esc":
+		if m.state == stateTorrents {
+			if m.searching {
+				return m.onTorrentsKey(msg) // clear the filter first
+			}
+			return m.cancelTorrents()
+		}
 		return m.quit()
 	case "q":
-		if m.state != stateWizard {
+		// "q" is typed into the wizard fields and the torrent filter, and quits
+		// everywhere else.
+		if m.state != stateWizard && !(m.state == stateTorrents && m.searching) {
 			return m.quit()
 		}
 	}
@@ -453,6 +552,8 @@ func (m tuiModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.state {
 	case stateWizard:
 		return m.onWizardKey(msg)
+	case stateTorrents:
+		return m.onTorrentsKey(msg)
 	case stateDownloading:
 		switch msg.String() {
 		case "p":
@@ -490,6 +591,9 @@ func (m tuiModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m tuiModel) onWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+r" {
+		return m.startTorrentFetch()
+	}
 	switch msg.String() {
 	case "tab", "down":
 		m.focus = (m.focus + 1) % len(m.inputs)
@@ -514,6 +618,126 @@ func (m tuiModel) onWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.err = ""
 	}
 	return m, cmd
+}
+
+// startTorrentFetch validates the server URL and loads the torrent list.
+func (m tuiModel) startTorrentFetch() (tea.Model, tea.Cmd) {
+	server := cleanBaseURL(m.inputs[0].Value())
+	if server == "" {
+		m.err = "Server URL is required to list torrents"
+		return m, nil
+	}
+	if !strings.HasPrefix(server, "http://") && !strings.HasPrefix(server, "https://") {
+		m.err = "Server URL must start with http:// or https://"
+		return m, nil
+	}
+	m.inputs[0].SetValue(server)
+	m.cfg.Server = server
+	m.err = ""
+	m.state = stateTorrents
+	m.torrentLoading = true
+	m.torrentErr = ""
+	m.torrents = nil
+	m.torrentSel = 0
+	m.torrentOffset = 0
+	m.searching = false
+	m.filter = ""
+	m.searchInput.SetValue("")
+	m.searchInput.Blur()
+
+	go func() {
+		entries, err := listTorrents(m.baseCtx, newSession(), server)
+		m.control <- msgTorrents{entries: entries, err: err}
+	}()
+	return m, waitForControl(m.control)
+}
+
+// cancelTorrents leaves the picker without changing the hash.
+func (m tuiModel) cancelTorrents() (tea.Model, tea.Cmd) {
+	m.state = stateWizard
+	m.torrentLoading = false
+	m.torrentErr = ""
+	m.stopSearch(true)
+	m.focus = 1
+	m.syncFocus()
+	return m, textinput.Blink
+}
+
+func (m tuiModel) onTorrentsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.searching {
+		return m.onTorrentsSearchKey(msg)
+	}
+	switch msg.String() {
+	case "ctrl+f", "/":
+		m.searching = true
+		m.searchInput.Focus()
+		return m, textinput.Blink
+	case "r":
+		return m.startTorrentFetch()
+	case "up", "k":
+		m.moveTorrentSelection(-1)
+	case "down", "j":
+		m.moveTorrentSelection(1)
+	case "enter":
+		visible := m.visibleTorrents()
+		if m.torrentSel >= 0 && m.torrentSel < len(visible) {
+			chosen := visible[m.torrentSel]
+			m.inputs[1].SetValue(chosen.Hash)
+			m.cfg.Hash = chosen.Hash
+			m.selectedTorrent = chosen.Name
+			m.stopSearch(true)
+			m.state = stateWizard
+			m.focus = 2
+			m.syncFocus()
+			return m, textinput.Blink
+		}
+	}
+	return m, nil
+}
+
+// onTorrentsSearchKey routes keys to the filter box while it is focused.
+func (m tuiModel) onTorrentsSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.stopSearch(true)
+		return m, nil
+	case "enter":
+		m.stopSearch(false)
+		return m, nil
+	case "up", "ctrl+p":
+		m.moveTorrentSelection(-1)
+		return m, nil
+	case "down", "ctrl+n":
+		m.moveTorrentSelection(1)
+		return m, nil
+	case "ctrl+f":
+		m.searching = false
+		m.searchInput.Blur()
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.searchInput, cmd = m.searchInput.Update(msg)
+	m.applyFilter()
+	return m, cmd
+}
+
+// clampTorrentScroll keeps the highlighted torrent inside the visible window.
+func (m *tuiModel) clampTorrentScroll() {
+	rows := m.torrentRows()
+	if m.torrentSel < m.torrentOffset {
+		m.torrentOffset = m.torrentSel
+	}
+	if m.torrentSel >= m.torrentOffset+rows {
+		m.torrentOffset = m.torrentSel - rows + 1
+	}
+	n := len(m.visibleTorrents())
+	if m.torrentOffset > n-rows && n > rows {
+		m.torrentOffset = n - rows
+	}
+	if m.torrentOffset < 0 {
+		m.torrentOffset = 0
+	}
 }
 
 func (m *tuiModel) syncFocus() {
@@ -607,6 +831,7 @@ func (m *tuiModel) layout() {
 	for i := range m.inputs {
 		m.inputs[i].Width = inputWidth
 	}
+	m.searchInput.Width = inputWidth
 
 	m.fileBarWidth = clampInt(cw/3, 16, 40)
 	m.overall.Width = cw
@@ -648,6 +873,16 @@ func (m tuiModel) fileRows() int {
 	return rows
 }
 
+// torrentRows returns how many torrents fit in the picker (each entry uses two
+// lines: name plus hash).
+func (m tuiModel) torrentRows() int {
+	rows := (m.bodyHeight - 8) / 2
+	if rows < 1 {
+		rows = 1
+	}
+	return rows
+}
+
 // --- view -------------------------------------------------------------------
 
 func (m tuiModel) View() string {
@@ -663,6 +898,8 @@ func (m tuiModel) View() string {
 		return m.frame(m.viewWizard(), m.footer())
 	case stateFetching:
 		return m.frame(m.viewFetching(), m.footer())
+	case stateTorrents:
+		return m.frame(m.viewTorrents(), m.footer())
 	default:
 		return m.frame(m.viewDownload(), m.footer())
 	}
@@ -707,7 +944,13 @@ func (m tuiModel) viewWizard() string {
 			labelStyle = lipgloss.NewStyle().Bold(true)
 		}
 		b.WriteString(fmt.Sprintf("%s%s\n", cursor, labelStyle.Render(labels[i])))
-		b.WriteString("  " + in.View() + "\n\n")
+		b.WriteString("  " + in.View() + "\n")
+		if i == 1 {
+			if hint := m.hashHint(); hint != "" {
+				b.WriteString("    " + hint + "\n")
+			}
+		}
+		b.WriteString("\n")
 	}
 
 	if m.err != "" {
@@ -725,6 +968,100 @@ func (m tuiModel) viewFetching() string {
 	b.WriteString(fmt.Sprintf("%s %s\n", styleAccent.Render(frame), styleTitle.Render("Fetching torrent metadata...")))
 	b.WriteString(m.rule() + "\n\n")
 	b.WriteString(m.renderLogArea(logs))
+	return b.String()
+}
+
+// hashHint shows the picked torrent or, while the hash field is focused, the
+// key that opens the server-side picker.
+func (m tuiModel) hashHint() string {
+	if m.selectedTorrent != "" {
+		return styleDone.Render("✓ " + truncate(m.selectedTorrent, m.contentWidth-6))
+	}
+	if m.focus == 1 {
+		return styleDim.Render("ctrl+r to choose from the server list")
+	}
+	return ""
+}
+
+func (m tuiModel) viewTorrents() string {
+	var b strings.Builder
+	b.WriteString(gradientBanner() + "\n")
+	b.WriteString(styleTitle.Render("Select a torrent") + "\n")
+	b.WriteString(m.rule() + "\n")
+
+	if m.torrentLoading {
+		frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+		frame := frames[m.spinnerFrame%len(frames)]
+		b.WriteString("\n" + styleAccent.Render(frame) + " " + styleMuted.Render("Fetching torrents...") + "\n")
+		return b.String()
+	}
+	if m.torrentErr != "" {
+		b.WriteString("\n" + styleErr.Render("✗ "+truncate(m.torrentErr, m.contentWidth-2)) + "\n")
+		b.WriteString(styleMuted.Render("Press r to retry, esc to go back.") + "\n")
+		return b.String()
+	}
+	if len(m.torrents) == 0 {
+		b.WriteString("\n" + styleMuted.Render("No torrents found on the server.") + "\n")
+		b.WriteString(styleMuted.Render("Press r to refresh, esc to go back.") + "\n")
+		return b.String()
+	}
+
+	visible := m.visibleTorrents()
+
+	if m.filter == "" {
+		b.WriteString(styleMuted.Render(fmt.Sprintf("%d torrent(s)", len(m.torrents))) + "\n")
+	} else {
+		b.WriteString(styleMuted.Render(fmt.Sprintf("%d/%d torrent(s)", len(visible), len(m.torrents))) + "\n")
+	}
+	switch {
+	case m.searching:
+		b.WriteString("  " + m.searchInput.View() + "\n\n")
+	case m.filter != "":
+		b.WriteString("  " + styleAccent.Render("filter: ") + styleMuted.Render(truncate(m.filter, m.contentWidth-12)) + "\n\n")
+	default:
+		b.WriteString("\n")
+	}
+
+	if len(visible) == 0 {
+		b.WriteString(styleMuted.Render("No matching torrents.") + "\n")
+		return b.String()
+	}
+
+	rows := m.torrentRows()
+	start := m.torrentOffset
+	if start > len(visible)-1 {
+		start = max(0, len(visible)-rows)
+	}
+	if start < 0 {
+		start = 0
+	}
+	end := min(len(visible), start+rows)
+
+	if start > 0 {
+		b.WriteString(styleDim.Render(fmt.Sprintf("↑ %d more", start)) + "\n")
+	}
+	nameWidth := m.contentWidth - 6
+	if nameWidth < 8 {
+		nameWidth = 8
+	}
+	for i := start; i < end; i++ {
+		t := visible[i]
+		name := t.Name
+		if name == "" {
+			name = "(unnamed)"
+		}
+		cursor := styleDim.Render("  ")
+		nameStyle := styleMuted
+		if i == m.torrentSel {
+			cursor = styleAccent.Render("▸ ")
+			nameStyle = lipgloss.NewStyle().Bold(true)
+		}
+		b.WriteString(fmt.Sprintf("%s%s\n", cursor, nameStyle.Render(truncate(name, nameWidth))))
+		b.WriteString("    " + styleDim.Render(truncate(t.Hash, nameWidth)) + "\n")
+	}
+	if end < len(visible) {
+		b.WriteString(styleDim.Render(fmt.Sprintf("↓ %d more", len(visible)-end)) + "\n")
+	}
 	return b.String()
 }
 
@@ -908,7 +1245,18 @@ func (m tuiModel) footerKeys(compact bool) string {
 		if compact {
 			return hint("enter", "next") + sep + hint("esc", "quit")
 		}
-		return hint("enter", "next") + sep + hint("tab", "move") + sep + hint("esc", "quit")
+		return hint("enter", "next") + sep + hint("ctrl+r", "torrents") + sep + hint("tab", "move") + sep + hint("esc", "quit")
+	case stateTorrents:
+		if m.searching {
+			if compact {
+				return hint("enter", "apply") + sep + hint("esc", "clear")
+			}
+			return hint("↑↓", "move") + sep + hint("enter", "apply") + sep + hint("esc", "clear")
+		}
+		if compact {
+			return hint("ctrl+f", "filter") + sep + hint("enter", "select") + sep + hint("esc", "back")
+		}
+		return hint("↑↓", "move") + sep + hint("enter", "select") + sep + hint("ctrl+f", "filter") + sep + hint("r", "refresh") + sep + hint("esc", "back")
 	case stateFetching:
 		return hint("esc", "quit")
 	case stateDownloading:
@@ -944,6 +1292,11 @@ func (m tuiModel) footerStatus() string {
 	switch m.state {
 	case stateWizard:
 		return styleMuted.Render("setup")
+	case stateTorrents:
+		if m.searching {
+			return styleTitle.Render("filtering")
+		}
+		return styleTitle.Render("select torrent")
 	case stateFetching:
 		return styleTitle.Render("fetching metadata")
 	case stateDownloading:

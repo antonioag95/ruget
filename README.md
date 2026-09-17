@@ -42,6 +42,17 @@ ruget -u http://host:8081 -H <torrent-hash> -o ./downloads
 Run with no arguments on a terminal to launch the interactive wizard, which also
 lets you save the server URL to `ruget.json`.
 
+Don't know the torrent hash? Point `-u` at your server and list what's loaded:
+
+```sh
+ruget -u http://host:8081 -list          # prints "name<TAB>hash" and exits
+ruget -u http://host:8081                # interactive: pick a torrent from a menu
+```
+
+In the TUI wizard, leave the hash field and press `ctrl+r` to browse the server's
+torrents with the arrow keys and pick one — no hash typing required. Press
+`ctrl+f` (or `/`) to filter the list by name or hash; `esc` clears the filter.
+
 ### Flags
 
 | Flag | Description |
@@ -55,6 +66,7 @@ lets you save the server URL to `ruget.json`.
 | `-cli` | Force the plain CLI instead of the TUI |
 | `-config` | Path to config file (default: `ruget.json` next to the executable) |
 | `-save-config` | Save the merged settings to the config file and exit |
+| `-list` | List the server's torrents as `name<TAB>hash` and exit |
 | `-dump-fls` | Print the raw file-list response and exit (diagnostic) |
 | `-v`, `-version` | Print version and author, then exit |
 
@@ -62,10 +74,13 @@ lets you save the server URL to `ruget.json`.
 
 | Key | Action |
 | --- | --- |
+| `ctrl+r` | (Wizard) List torrents on the server and pick one |
+| `ctrl+f` / `/` | (Picker) Filter torrents by name or hash |
+| `↑` / `k`, `↓` / `j` | Move the selection / scroll the file list |
+| `enter` | (Picker) Apply filter, then select the highlighted torrent |
+| `r` | Retry failed files / refresh the torrent list |
 | `p` | Pause / resume |
-| `r` | Retry failed files |
-| `↑` / `k`, `↓` / `j` | Scroll the file list |
-| `q`, `esc`, `ctrl+c` | Quit |
+| `q`, `esc`, `ctrl+c` | Quit (`esc` goes back in the torrent picker) |
 
 ## Configuration
 

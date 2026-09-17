@@ -67,6 +67,111 @@ func mockRTorrent(t *testing.T) *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
+// mockMultiTorrent returns a server whose "list" response advertises the given
+// torrents (hash -> name).
+func mockMultiTorrent(t *testing.T, torrents map[string]string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/plugins/httprpc/action.php", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		if !strings.Contains(string(body), "mode=list") {
+			io.WriteString(w, `[["file.bin"]]`)
+			return
+		}
+		var b strings.Builder
+		b.WriteString(`{"t":{`)
+		first := true
+		for hash, name := range torrents {
+			if !first {
+				b.WriteString(",")
+			}
+			first = false
+			fmt.Fprintf(&b, `"%s":[0,1,2,3,"%s",6]`, hash, name)
+		}
+		b.WriteString(`}}`)
+		io.WriteString(w, b.String())
+	})
+	return httptest.NewServer(mux)
+}
+
+func TestListTorrents(t *testing.T) {
+	srv := mockMultiTorrent(t, map[string]string{
+		"BBBBBBBBBBBBBBBB": "Zebra",
+		"AAAAAAAAAAAAAAAA": "apple",
+	})
+	defer srv.Close()
+
+	entries, err := listTorrents(context.Background(), newSession(), srv.URL)
+	if err != nil {
+		t.Fatalf("listTorrents: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(entries))
+	}
+	if entries[0].Name != "apple" || entries[0].Hash != "AAAAAAAAAAAAAAAA" {
+		t.Fatalf("first = %+v, want apple/AAAA...", entries[0])
+	}
+	if entries[1].Name != "Zebra" {
+		t.Fatalf("second = %+v, want Zebra", entries[1])
+	}
+}
+
+func TestListTorrentsEmpty(t *testing.T) {
+	srv := mockMultiTorrent(t, nil)
+	defer srv.Close()
+
+	entries, err := listTorrents(context.Background(), newSession(), srv.URL)
+	if err != nil {
+		t.Fatalf("listTorrents: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("entries = %d, want 0", len(entries))
+	}
+}
+
+func TestPromptTorrent(t *testing.T) {
+	srv := mockMultiTorrent(t, map[string]string{
+		"AAAAAAAAAAAAAAAA": "apple",
+		"BBBBBBBBBBBBBBBB": "Zebra",
+	})
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Server = srv.URL
+	var out bytes.Buffer
+	if err := promptTorrent(context.Background(), &cfg, strings.NewReader("2\n"), &out); err != nil {
+		t.Fatalf("promptTorrent: %v", err)
+	}
+	if cfg.Hash != "BBBBBBBBBBBBBBBB" {
+		t.Fatalf("hash = %q, want BBBB...", cfg.Hash)
+	}
+	if !strings.Contains(out.String(), "apple") {
+		t.Fatalf("menu missing torrent name:\n%s", out.String())
+	}
+
+	cfg2 := DefaultConfig()
+	cfg2.Server = srv.URL
+	if err := promptTorrent(context.Background(), &cfg2, strings.NewReader("99\n"), io.Discard); err == nil {
+		t.Fatal("expected error for out-of-range selection")
+	}
+	if cfg2.Hash != "" {
+		t.Fatalf("hash must stay empty on bad input, got %q", cfg2.Hash)
+	}
+}
+
+func TestListFlag(t *testing.T) {
+	srv := mockMultiTorrent(t, map[string]string{"AAAAAAAAAAAAAAAA": "apple"})
+	defer srv.Close()
+
+	if code := run([]string{"-u", srv.URL, "-list", "-config", filepath.Join(t.TempDir(), "cfg.json")}); code != 0 {
+		t.Fatalf("-list exit = %d, want 0", code)
+	}
+	if code := run([]string{"-list", "-config", filepath.Join(t.TempDir(), "cfg.json")}); code != 2 {
+		t.Fatalf("-list without server exit = %d, want 2", code)
+	}
+}
+
 func testConfig(dir string) Config {
 	cfg := DefaultConfig()
 	cfg.Server = ""

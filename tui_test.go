@@ -77,6 +77,10 @@ func TestTUIViewsDoNotPanic(t *testing.T) {
 		_ = mm.View()
 		mm.state = stateDone
 		_ = mm.View()
+		mm.state = stateTorrents
+		_ = mm.View()
+		mm.torrentLoading = true
+		_ = mm.View()
 	}
 }
 
@@ -137,6 +141,165 @@ func TestTUIPrepareStartsDownload(t *testing.T) {
 	case <-mm.control:
 	case <-time.After(10 * time.Second):
 		t.Fatal("timeout waiting for download completion")
+	}
+}
+
+func TestTUITorrentPicker(t *testing.T) {
+	srv := mockMultiTorrent(t, map[string]string{
+		"AAAAAAAAAAAAAAAA": "apple",
+		"BBBBBBBBBBBBBBBB": "Zebra",
+	})
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Server = srv.URL
+	m := newTUIModel(context.Background(), cfg, "")
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	mm := tm.(tuiModel)
+	mm.inputs[0].SetValue(srv.URL)
+
+	// ctrl+r from the wizard opens the picker and starts the fetch.
+	tm, _ = mm.onKey(tea.KeyMsg{Type: tea.KeyCtrlR})
+	mm = tm.(tuiModel)
+	if mm.state != stateTorrents {
+		t.Fatalf("state = %d, want torrents", mm.state)
+	}
+
+	select {
+	case msg := <-mm.control:
+		tm, _ = mm.Update(msg)
+		mm = tm.(tuiModel)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for torrent list")
+	}
+	if len(mm.torrents) != 2 {
+		t.Fatalf("torrents = %d, want 2", len(mm.torrents))
+	}
+
+	// Move to the second entry and select it.
+	tm, _ = mm.onKey(tea.KeyMsg{Type: tea.KeyDown})
+	mm = tm.(tuiModel)
+	tm, _ = mm.onKey(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = tm.(tuiModel)
+
+	if mm.state != stateWizard {
+		t.Fatalf("state = %d, want wizard", mm.state)
+	}
+	if mm.inputs[1].Value() != "BBBBBBBBBBBBBBBB" {
+		t.Fatalf("hash = %q, want BBBB...", mm.inputs[1].Value())
+	}
+	if mm.selectedTorrent != "Zebra" {
+		t.Fatalf("selectedTorrent = %q, want Zebra", mm.selectedTorrent)
+	}
+}
+
+func TestTUITorrentPickerFilter(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Server = "http://example:8080"
+	m := newTUIModel(context.Background(), cfg, "")
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	mm := tm.(tuiModel)
+	mm.state = stateTorrents
+	mm.torrents = []torrentEntry{
+		{Hash: "AAAAAAAAAAAAAAAA", Name: "apple"},
+		{Hash: "BBBBBBBBBBBBBBBB", Name: "Zebra"},
+		{Hash: "CCCCCCCCCCCCCCCC", Name: "zebra fish"},
+	}
+
+	// ctrl+f opens the filter box.
+	tm, _ = mm.onKey(tea.KeyMsg{Type: tea.KeyCtrlF})
+	mm = tm.(tuiModel)
+	if !mm.searching {
+		t.Fatal("expected searching after ctrl+f")
+	}
+
+	for _, r := range "zeb" {
+		tm, _ = mm.onKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		mm = tm.(tuiModel)
+	}
+	if got := len(mm.visibleTorrents()); got != 2 {
+		t.Fatalf("visible = %d, want 2", got)
+	}
+
+	// Filtering by hash works too.
+	mm.searchInput.SetValue("CCCC")
+	mm.applyFilter()
+	if got := len(mm.visibleTorrents()); got != 1 {
+		t.Fatalf("hash filter visible = %d, want 1", got)
+	}
+
+	// Enter applies the filter and returns focus to the list...
+	mm.searchInput.SetValue("zeb")
+	mm.applyFilter()
+	tm, _ = mm.onKey(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = tm.(tuiModel)
+	if mm.state != stateTorrents || mm.searching {
+		t.Fatalf("after apply: state=%d searching=%v", mm.state, mm.searching)
+	}
+	if got := len(mm.visibleTorrents()); got != 2 {
+		t.Fatalf("visible after apply = %d, want 2", got)
+	}
+
+	// ...then enter again selects the first match and clears the filter.
+	tm, _ = mm.onKey(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = tm.(tuiModel)
+	if mm.state != stateWizard {
+		t.Fatalf("state = %d, want wizard", mm.state)
+	}
+	if mm.inputs[1].Value() != "BBBBBBBBBBBBBBBB" {
+		t.Fatalf("hash = %q, want Zebra's", mm.inputs[1].Value())
+	}
+	if mm.filter != "" {
+		t.Fatalf("filter should be cleared after select, got %q", mm.filter)
+	}
+}
+
+func TestTUITorrentPickerFilterEsc(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Server = "http://example:8080"
+	m := newTUIModel(context.Background(), cfg, "")
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	mm := tm.(tuiModel)
+	mm.state = stateTorrents
+	mm.torrents = []torrentEntry{{Hash: "AAAAAAAAAAAAAAAA", Name: "apple"}}
+
+	tm, _ = mm.onKey(tea.KeyMsg{Type: tea.KeyCtrlF})
+	mm = tm.(tuiModel)
+	tm, _ = mm.onKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("app")})
+	mm = tm.(tuiModel)
+
+	// First esc clears the query but stays in the picker.
+	tm, _ = mm.onKey(tea.KeyMsg{Type: tea.KeyEsc})
+	mm = tm.(tuiModel)
+	if mm.state != stateTorrents || mm.searching || mm.filter != "" {
+		t.Fatalf("after first esc: state=%d searching=%v filter=%q", mm.state, mm.searching, mm.filter)
+	}
+
+	// Second esc leaves the picker.
+	tm, _ = mm.onKey(tea.KeyMsg{Type: tea.KeyEsc})
+	mm = tm.(tuiModel)
+	if mm.state != stateWizard {
+		t.Fatalf("after second esc: state = %d, want wizard", mm.state)
+	}
+}
+
+func TestTUITorrentPickerCancel(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Server = "http://example:8080"
+	m := newTUIModel(context.Background(), cfg, "")
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	mm := tm.(tuiModel)
+	mm.state = stateTorrents
+	mm.torrents = []torrentEntry{{Hash: "AAAA", Name: "apple"}}
+
+	tm, _ = mm.onKey(tea.KeyMsg{Type: tea.KeyEsc})
+	mm = tm.(tuiModel)
+	if mm.state != stateWizard {
+		t.Fatalf("state = %d, want wizard after esc", mm.state)
 	}
 }
 

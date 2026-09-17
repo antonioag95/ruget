@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,12 @@ import (
 type fileEntry struct {
 	RawPath string // server-side relative path (slash separated)
 	Size    int64  // total bytes, or -1 when unknown
+}
+
+// torrentEntry is one torrent loaded on the server: its info hash and name.
+type torrentEntry struct {
+	Hash string
+	Name string
 }
 
 // encodeForm builds an application/x-www-form-urlencoded body while preserving
@@ -64,10 +71,9 @@ func apiPost(ctx context.Context, client *http.Client, base, body string) ([]byt
 	return io.ReadAll(resp.Body)
 }
 
-// getTorrentName fetches and sanitizes the display name of the torrent.
-func getTorrentName(ctx context.Context, client *http.Client, base, hash string, rep Reporter) (string, error) {
-	rep.Status("①  Fetching torrent name...")
-
+// fetchTorrentList performs the "list" request and returns the raw per-hash
+// rows. It is shared by the single-torrent lookup and the full listing.
+func fetchTorrentList(ctx context.Context, client *http.Client, base string) (map[string][]json.RawMessage, error) {
 	pairs := [][2]string{{"mode", "list"}}
 	for _, cmd := range listCmds {
 		pairs = append(pairs, [2]string{"cmd", cmd})
@@ -75,17 +81,69 @@ func getTorrentName(ctx context.Context, client *http.Client, base, hash string,
 
 	data, err := apiPost(ctx, client, base, encodeForm(pairs))
 	if err != nil {
-		return "", fmt.Errorf("fetching torrent list: %w", err)
+		return nil, fmt.Errorf("fetching torrent list: %w", err)
 	}
 
 	var payload struct {
 		T map[string][]json.RawMessage `json:"t"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
-		return "", fmt.Errorf("decoding torrent list: %w", err)
+		return nil, fmt.Errorf("decoding torrent list: %w", err)
+	}
+	return payload.T, nil
+}
+
+// listTorrents returns every torrent loaded on the server, sorted by name
+// (case-insensitive, ties broken by hash) so the picker is deterministic.
+func listTorrents(ctx context.Context, client *http.Client, base string) ([]torrentEntry, error) {
+	t, err := fetchTorrentList(ctx, client, base)
+	if err != nil {
+		return nil, err
 	}
 
-	raw, ok := payload.T[hash]
+	entries := make([]torrentEntry, 0, len(t))
+	for hash, raw := range t {
+		var name string
+		if len(raw) > nameIndex {
+			_ = json.Unmarshal(raw[nameIndex], &name)
+		}
+		entries = append(entries, torrentEntry{Hash: strings.ToUpper(hash), Name: strings.TrimSpace(name)})
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		ni, nj := strings.ToLower(entries[i].Name), strings.ToLower(entries[j].Name)
+		if ni != nj {
+			return ni < nj
+		}
+		return entries[i].Hash < entries[j].Hash
+	})
+	return entries, nil
+}
+
+// lookupTorrent finds a hash in the list response, tolerating case differences
+// between the key returned by the server and the one supplied by the user.
+func lookupTorrent(t map[string][]json.RawMessage, hash string) ([]json.RawMessage, bool) {
+	if raw, ok := t[hash]; ok {
+		return raw, true
+	}
+	for k, raw := range t {
+		if strings.EqualFold(k, hash) {
+			return raw, true
+		}
+	}
+	return nil, false
+}
+
+// getTorrentName fetches and sanitizes the display name of the torrent.
+func getTorrentName(ctx context.Context, client *http.Client, base, hash string, rep Reporter) (string, error) {
+	rep.Status("①  Fetching torrent name...")
+
+	t, err := fetchTorrentList(ctx, client, base)
+	if err != nil {
+		return "", err
+	}
+
+	raw, ok := lookupTorrent(t, hash)
 	if !ok || len(raw) <= nameIndex {
 		return "", fmt.Errorf("torrent with hash %s not found in the list", hash)
 	}

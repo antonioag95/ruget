@@ -31,6 +31,7 @@ func run(args []string) int {
 		retries     int
 		noProbe     bool
 		dumpFLS     bool
+		listOnly    bool
 		saveConfig  bool
 		showVersion bool
 	)
@@ -48,6 +49,7 @@ func run(args []string) int {
 	fs.IntVar(&retries, "retries", -1, "Retry attempts for transient failures")
 	fs.BoolVar(&noProbe, "no-probe", false, "Do not probe file sizes before downloading")
 	fs.BoolVar(&dumpFLS, "dump-fls", false, "Print the raw file-list response and exit")
+	fs.BoolVar(&listOnly, "list", false, "List all torrents on the server (name and hash) and exit")
 	fs.BoolVar(&saveConfig, "save-config", false, "Save merged settings to the config file and exit")
 	fs.BoolVar(&showVersion, "version", false, "Print version and author, then exit")
 	fs.BoolVar(&showVersion, "v", false, "Print version and author, then exit")
@@ -122,6 +124,24 @@ func run(args []string) int {
 		configHint = "ruget.json"
 	}
 
+	if listOnly {
+		if cfg.Server == "" {
+			fmt.Fprintf(os.Stderr, "[!] server URL is required. Pass -u or edit %s.\n", configHint)
+			return 2
+		}
+		entries, err := listTorrents(ctx, newSession(), cfg.Server)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[!] %v\n", err)
+			return 1
+		}
+		if len(entries) == 0 {
+			fmt.Fprintf(os.Stderr, "[!] no torrents found on %s\n", cfg.Server)
+			return 1
+		}
+		printTorrents(os.Stdout, entries)
+		return 0
+	}
+
 	if dumpFLS {
 		if missing := cfg.validateEndpoint(); missing != "" {
 			fmt.Fprintf(os.Stderr, "[!] %s. Pass -u/-H or edit %s.\n", missing, configHint)
@@ -139,6 +159,18 @@ func run(args []string) int {
 
 	interactive := isTerminal(os.Stdin) && isTerminal(os.Stdout)
 	if cli || !interactive {
+		if cfg.Server == "" {
+			fmt.Fprintf(os.Stderr, "[!] server URL is required. Pass -u or edit %s.\n", configHint)
+			return 2
+		}
+		// No hash supplied: if we have a terminal, let the user pick a torrent
+		// from the server instead of pasting a 40-char info hash.
+		if cfg.Hash == "" && isTerminal(os.Stdin) {
+			if err := promptTorrent(ctx, &cfg, os.Stdin, os.Stdout); err != nil {
+				fmt.Fprintf(os.Stderr, "[!] %v\n", err)
+				return 1
+			}
+		}
 		if missing := cfg.validateEndpoint(); missing != "" {
 			fmt.Fprintf(os.Stderr, "[!] %s. Pass -u/-H or edit %s.\n", missing, configHint)
 			return 2

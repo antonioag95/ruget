@@ -13,7 +13,7 @@ const (
 // version is the release version. Override at build time with:
 //
 //	go build -ldflags "-X main.version=1.2.3" -o ruget.exe .
-var version = "1.0.0"
+var version = "1.1.0"
 
 // buildInfo returns a compact "commit <sha> (<date>)" string when VCS metadata
 // is embedded in the binary, otherwise "".
