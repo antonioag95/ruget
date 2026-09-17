@@ -24,7 +24,7 @@ var (
 	responseHeaderWait = 15 * time.Second
 )
 
-// Commands for the "list" request; ordered exactly like the Python payload.
+// Commands for the "list" request, in the order ruTorrent expects.
 var listCmds = []string{
 	"d.throttle_name=",
 	"d.custom=chk-state",
@@ -142,7 +142,7 @@ func cleanBaseURL(raw string) string {
 	return strings.TrimRight(u.String(), "/")
 }
 
-// normalize applies light cleanup consistent with the Python front-end.
+// normalize applies light cleanup to user-supplied values.
 func (c *Config) normalize() {
 	c.Server = cleanBaseURL(c.Server)
 	c.Hash = strings.ToUpper(strings.TrimSpace(c.Hash))

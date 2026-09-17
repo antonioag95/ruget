@@ -20,7 +20,7 @@ type fileEntry struct {
 }
 
 // encodeForm builds an application/x-www-form-urlencoded body while preserving
-// the exact pair order sent by scarica.py (url.Values would sort the keys).
+// the exact pair order ruTorrent expects (url.Values would sort the keys).
 func encodeForm(pairs [][2]string) string {
 	var b strings.Builder
 	for i, p := range pairs {

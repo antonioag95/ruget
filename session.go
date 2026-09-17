@@ -8,7 +8,7 @@ import (
 )
 
 // newSession builds the HTTP client ruTorrent expects: TLS verification is
-// intentionally disabled (matching the Python original's verify=False).
+// intentionally disabled for self-signed certificates on trusted servers.
 func newSession() *http.Client {
 	dialer := &net.Dialer{Timeout: dialTimeout}
 
@@ -21,13 +21,13 @@ func newSession() *http.Client {
 		MaxIdleConns:          64,
 		MaxIdleConnsPerHost:   16,
 		IdleConnTimeout:       60 * time.Second,
-		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // parity with scarica.py
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // self-signed certs on trusted servers
 	}
 
 	return &http.Client{Transport: transport}
 }
 
-// setCommonHeaders mirrors the headers scarica.py sends with every request.
+// setCommonHeaders sets the headers ruTorrent expects on every request.
 func setCommonHeaders(req *http.Request, base string) {
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")

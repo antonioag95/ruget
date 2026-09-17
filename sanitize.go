@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// unsafeNameRe matches the characters scarica.py strips from file/folder names.
+// unsafeNameRe matches the characters stripped from file/folder names.
 var unsafeNameRe = regexp.MustCompile(`[<>:"/\\|?*;\[\]\x00-\x1f]`)
 
 // sanitizeName cleans a single file or folder name. It removes

@@ -98,10 +98,9 @@ download, not a setting, so it is supplied per run via `-H` or the wizard.
 
 ## Security
 
-- **TLS verification is disabled** (`InsecureSkipVerify`) to match the behavior of
-  the original Python script this tool is derived from. It is intended for trusted
-  LAN/self-hosted servers with self-signed certificates. Do **not** point `ruget` at
-  an untrusted host over a public network.
+- **TLS verification is disabled** (`InsecureSkipVerify`) for compatibility with
+  self-signed certificates on trusted LAN/self-hosted servers. Do **not** point
+  `ruget` at an untrusted host over a public network.
 - The torrent hash is never written to disk.
 
 ## Build
@@ -138,6 +137,6 @@ gofmt -l .
 CI runs these on every push and pull request; tagging `v*` builds and publishes the
 cross-platform binaries to a GitHub Release.
 
-## Credits
+## License
 
-Derived from the original `scarica.py` script. Licensed under the [MIT License](LICENSE).
+Released under the [MIT License](LICENSE).
