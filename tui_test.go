@@ -303,6 +303,83 @@ func TestTUITorrentPickerCancel(t *testing.T) {
 	}
 }
 
+func TestScrollWindow(t *testing.T) {
+	if got := scrollWindow("short", 8, 0); got != "short" {
+		t.Fatalf("fit = %q, want unchanged", got)
+	}
+
+	s := "0123456789ABCDEFGHIJ"
+	const w = 8
+
+	// The head is shown first and held for the whole pause.
+	for pos := 0; pos < marqueePauseTicks; pos++ {
+		if got := scrollWindow(s, w, pos); got != "01234567" {
+			t.Fatalf("pos %d = %q, want head", pos, got)
+		}
+	}
+
+	// After the pause it scrolls one rune per step.
+	if got := scrollWindow(s, w, marqueePauseTicks+1); got != "12345678" {
+		t.Fatalf("first scroll = %q, want 12345678", got)
+	}
+
+	overflow := len(s) - w
+	// The tail is held once the end is reached.
+	if got := scrollWindow(s, w, marqueePauseTicks+overflow+1); got != s[overflow:] {
+		t.Fatalf("tail = %q, want %q", got, s[overflow:])
+	}
+
+	// A full cycle wraps back to the head.
+	if got := scrollWindow(s, w, overflow+2*marqueePauseTicks); got != "01234567" {
+		t.Fatalf("wrap = %q, want head", got)
+	}
+}
+
+func TestStatusLabelMarquee(t *testing.T) {
+	f := fileProgress{path: "very-long-directory-name/file.bin", total: 10}
+	const width = 10
+
+	head := statusLabel(f, width, 0)
+	if !strings.Contains(head, "· very-long-") {
+		t.Fatalf("head = %q, want glyph plus beginning of the path", head)
+	}
+
+	if scrolled := statusLabel(f, width, marqueePauseTicks+2); scrolled == head {
+		t.Fatalf("expected the label to scroll, got %q", scrolled)
+	}
+}
+
+func TestTUITorrentPickerOnlySelectedScrolls(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Server = "http://example:8080"
+	m := newTUIModel(context.Background(), cfg, "")
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 60, Height: 40})
+	mm := tm.(tuiModel)
+	mm.state = stateTorrents
+
+	first := "AAAAAAAAAA-BBBBBBBBBB-CCCCCCCCCC-DDDDDDDDDD-EEEEEEEEEE-FFFFFFFFFFFFFFFFFFFFFFFF"
+	second := "1111111111-2222222222-3333333333-4444444444-5555555555-6666666666-7777777777"
+	mm.torrents = []torrentEntry{
+		{Hash: "AAAAAAAAAAAAAAAA", Name: first},
+		{Hash: "BBBBBBBBBBBBBBBB", Name: second},
+	}
+	mm.torrentSel = 1 // the first row is not selected
+
+	mm.spinnerFrame = 0
+	base := mm.View()
+	mm.spinnerFrame = (marqueePauseTicks + 5) * marqueeTickDiv
+	moved := mm.View()
+
+	if base == moved {
+		t.Fatal("expected the selected row to scroll")
+	}
+	head := string([]rune(first)[:20])
+	if !strings.Contains(moved, head) {
+		t.Fatalf("unselected row scrolled unexpectedly:\n%s", moved)
+	}
+}
+
 func TestDefaultConfigHasNoEndpoint(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.Server != "" || cfg.Hash != "" {

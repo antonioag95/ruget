@@ -35,6 +35,12 @@ const (
 	rightMargin   = 1
 	footerLines   = 1
 	logLines      = 4
+
+	// Long names scroll horizontally: they start at the beginning and are held
+	// there for marqueePauseTicks, then move one rune every marqueeTickDiv ticks
+	// before pausing again at the end.
+	marqueeTickDiv    = 2
+	marqueePauseTicks = 8
 )
 
 var (
@@ -1052,11 +1058,13 @@ func (m tuiModel) viewTorrents() string {
 		}
 		cursor := styleDim.Render("  ")
 		nameStyle := styleMuted
+		pos := 0 // only the highlighted torrent scrolls, to limit motion
 		if i == m.torrentSel {
 			cursor = styleAccent.Render("▸ ")
 			nameStyle = lipgloss.NewStyle().Bold(true)
+			pos = m.marqueePos()
 		}
-		b.WriteString(fmt.Sprintf("%s%s\n", cursor, nameStyle.Render(truncate(name, nameWidth))))
+		b.WriteString(fmt.Sprintf("%s%s\n", cursor, nameStyle.Render(scrollWindow(name, nameWidth, pos))))
 		b.WriteString("    " + styleDim.Render(truncate(t.Hash, nameWidth)) + "\n")
 	}
 	if end < len(visible) {
@@ -1165,7 +1173,7 @@ func (m tuiModel) visibleFileRows() string {
 		b.WriteString(fmt.Sprintf("%s %s %s\n",
 			styleDim.Render(fmt.Sprintf("%3d", i)),
 			bar,
-			statusLabel(f, nameWidth),
+			statusLabel(f, nameWidth, m.marqueePos()),
 		))
 	}
 	if end < len(files) {
@@ -1314,8 +1322,39 @@ func (m tuiModel) footerStatus() string {
 	return ""
 }
 
-func statusLabel(f fileProgress, width int) string {
-	name := truncate(f.path, width)
+// marqueePos is the current horizontal scroll step, advanced by the render tick.
+func (m tuiModel) marqueePos() int { return m.spinnerFrame / marqueeTickDiv }
+
+// scrollWindow returns a width-rune window into s for a marquee at step pos.
+// It holds at the head first so the beginning is always visible before moving,
+// then scrolls a rune at a time and pauses at the tail before looping. Strings
+// that already fit are returned unchanged.
+func scrollWindow(s string, width, pos int) string {
+	runes := []rune(s)
+	if width <= 0 || len(runes) <= width {
+		return s
+	}
+	overflow := len(runes) - width
+	cycle := overflow + 2*marqueePauseTicks
+	p := pos % cycle
+	if p < 0 {
+		p += cycle
+	}
+
+	start := 0
+	switch {
+	case p < marqueePauseTicks:
+		start = 0
+	case p < marqueePauseTicks+overflow:
+		start = p - marqueePauseTicks
+	default:
+		start = overflow
+	}
+	return string(runes[start : start+width])
+}
+
+func statusLabel(f fileProgress, width, pos int) string {
+	name := scrollWindow(f.path, width, pos)
 	switch {
 	case f.finished && f.outcome == OutcomeFailed:
 		return styleErr.Render("✗ " + name)
